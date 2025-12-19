@@ -135,7 +135,3 @@ The bot uses `sqlite3` for all persistent data:
 🔥 Savings: 80%
 🔗 <a href='https://store.steampowered.com/app/620'>View on Steam website</a>
 ```
-
----
-## contact
-- [My website](https://www.amirhosseinparsa.ir/)
