@@ -6,7 +6,7 @@ import sqlite3
 import time
 import threading
 
-
+# Configuration
 TELEGRAM_TOKEN = "YOUR TELEGRAM BOT TOKEN"
 CHANNEL_USERNAME = "@YOUR_CHANNEL_USERNAME"
 CHANNEL_LINK = "YOUR CHANNEL USERNAME WITHOUT @"
@@ -47,6 +47,7 @@ class DatabaseManager:
         except Exception as e:
             logging.error(f"SQL Error: {e} | Query: {sql}")
             return None
+
 db = DatabaseManager(DB_FILE)
 
 def send_telegram(chat_id, text, is_channel=False):
@@ -63,28 +64,33 @@ def send_telegram(chat_id, text, is_channel=False):
         logging.error(f"Telegram error: {e}")
 
 def check_wishlist_loop():
+    """Permanent worker for checking the wishlist."""
+    logging.info("Wishlist worker started.")
     while True:
-        time.sleep(60)
-        items = db.query("SELECT id, chat_id, game_name FROM wishlist", fetch=True)
-        if not items: continue
-
-        for row_id, chat_id, game_name in items:
-            matches = db.query("SELECT title, salePrice , normalPrice , savings , url FROM deals WHERE title LIKE ?", (f"%{game_name}%",), fetch=True)
-            for m in matches:
-                msg = (
-                    "🎯 <b>Wishlist Match Found!</b>\n"
-                    f"🎮 {m[0]}\n"
-                    f"💰 Sale: ${m[1]}\n"
-                    f"💵 Normal: ${m[2]}\n"
-                    f"🔥 Savings: {m[3]}%\n"
-                    f"🔗 <a href='{m[4]}'>View on Steam website</a>"
-                )
-                send_telegram(chat_id, msg)
-                db.query("DELETE FROM wishlist WHERE id = ?", (row_id,), commit=True)
-                logging.info(f"Notified {chat_id} about {m[0]}")
+        try:
+            items = db.query("SELECT id, chat_id, game_name FROM wishlist", fetch=True)
+            if items:
+                for row_id, chat_id, game_name in items:
+                    matches = db.query("SELECT title, salePrice, normalPrice, savings, url FROM deals WHERE title LIKE ?", (f"%{game_name}%",), fetch=True)
+                    for m in matches:
+                        msg = (
+                            "🎯 <b>Wishlist Match Found!</b>\n"
+                            f"🎮 {m[0]}\n"
+                            f"💰 Sale: ${m[1]}\n"
+                            f"💵 Normal: ${m[2]}\n"
+                            f"🔥 Savings: {m[3]}%\n"
+                            f"🔗 <a href='{m[4]}'>View on Steam website</a>"
+                        )
+                        send_telegram(chat_id, msg)
+                        db.query("DELETE FROM wishlist WHERE id = ?", (row_id,), commit=True)
+                        logging.info(f"Notified {chat_id} about {m[0]}")
+        except Exception as e:
+            logging.error(f"Wishlist Loop Error: {e}")
+        
+        time.sleep(60) 
 
 def get_all_games():
-    """Syncs the complete game list from SteamSpy."""
+    """The actual logic for syncing games."""
     logging.info("Starting SteamSpy Full Sync...")
     page = 0
     while page < 5:  
@@ -111,13 +117,25 @@ def get_all_games():
             logging.error(f"SteamSpy Error: {e}")
             break
 
-
     db.query("""DELETE FROM all_games WHERE rowid NOT IN (SELECT MAX(rowid) FROM all_games GROUP BY title)""", commit=True)
+    logging.info("Sync completed and duplicates removed.")
+
+def sync_games_worker():
+    """Permanent worker that manages the 30-minute sync cycle."""
+    logging.info("Sync worker started.")
+    get_all_games()
+    
+    while True:
+        time.sleep(1800)
+        try:
+            get_all_games()
+        except Exception as e:
+            logging.error(f"Background Sync Error: {e}")
 
 def search_game(chat_id, word):
     rows = db.query("SELECT title, normalPrice, salePrice, savings, url FROM all_games WHERE title LIKE ?", (f"%{word}%",), fetch=True)
     if not rows:
-        send_telegram(chat_id, f"❌ No active discounts found for '{word}'. Added to wishlist! 🔔")
+        send_telegram(chat_id, f"❌ No active discounts found for '{word}'. Added to wishlist!")
         db.query("INSERT INTO wishlist (chat_id, game_name) VALUES (?, ?)", (chat_id, word), commit=True)
         return
 
@@ -133,6 +151,7 @@ def search_game(chat_id, word):
         send_telegram(chat_id, msg)
 
 def telegram_bot_worker():
+    logging.info("Telegram Bot worker started.")
     last_id = None
     while True:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates"
@@ -152,10 +171,12 @@ def telegram_bot_worker():
                     db.query("INSERT OR IGNORE INTO users (chat_id) VALUES (?)", (str(chat_id),), commit=True)
                     send_telegram(chat_id, f"👋 Welcome! I track Steam deals.\nJoin @{CHANNEL_LINK} for live updates.")
                 elif text.startswith("/search "):
-                    query_word = text.split(" ", 1)[1].strip()
-                    search_game(chat_id, query_word)
+                    parts = text.split(" ", 1)
+                    if len(parts) > 1:
+                        query_word = parts[1].strip()
+                        search_game(chat_id, query_word)
                 elif text == "/help":
-                    send_telegram(chat_id, "📌 <b>Commands:</b>\n/ search  [name] - Find a game\n/end_notification - Clear wishlist")
+                    send_telegram(chat_id, "📌 <b>Commands:</b>\n/search [name] - Find a game\n/end_notification - Clear wishlist")
                 elif text == "/end_notification":
                     db.query("DELETE FROM wishlist WHERE chat_id = ?", (str(chat_id),), commit=True)
                     send_telegram(chat_id, "🔇 Wishlist cleared.")
@@ -164,6 +185,7 @@ def telegram_bot_worker():
         time.sleep(1)
 
 def deals_tracker_worker():
+    logging.info("Deals tracker worker started.")
     while True:
         try:
             time_row = db.query("SELECT time FROM times ORDER BY id DESC LIMIT 1", fetch=True)
@@ -200,19 +222,21 @@ def deals_tracker_worker():
         time.sleep(300)
 
 if __name__ == "__main__":
-    get_all_games()
-    
-    threads = [
-        threading.Thread(target=telegram_bot_worker, daemon=True),
-        threading.Thread(target=deals_tracker_worker, daemon=True),
-        threading.Thread(target=check_wishlist_loop, daemon=True),
-        threading.Thread(target=lambda: (time.sleep(1800), get_all_games()) , daemon=True) 
+    workers = [
+        threading.Thread(target=telegram_bot_worker, name="BotWorker", daemon=True),
+        threading.Thread(target=deals_tracker_worker, name="DealsWorker", daemon=True),
+        threading.Thread(target=check_wishlist_loop, name="WishlistWorker", daemon=True),
+        threading.Thread(target=sync_games_worker, name="SyncWorker", daemon=True) 
     ]
     
-    for t in threads: t.start()
+    for t in workers:
+        t.start()
+        logging.info(f"Started thread: {t.name}")
     
-    logging.info("All systems Active")
+    logging.info("System fully operational. Press Ctrl+C to stop.")
+    
     try:
-        while True: time.sleep(1)
+        while True:
+            time.sleep(1)
     except KeyboardInterrupt:
-        logging.info("Shutting down...")
+        logging.info("Shutting down gracefully...")
