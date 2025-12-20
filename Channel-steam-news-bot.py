@@ -206,7 +206,7 @@ if __name__ == "__main__":
         threading.Thread(target=telegram_bot_worker, daemon=True),
         threading.Thread(target=deals_tracker_worker, daemon=True),
         threading.Thread(target=check_wishlist_loop, daemon=True),
-        threading.Thread(target=lambda: (time.sleep(3600), get_all_games()), daemon=True) # Periodic sync
+        threading.Thread(target=lambda: (time.sleep(1800), get_all_games()) , daemon=True) 
     ]
     
     for t in threads: t.start()
